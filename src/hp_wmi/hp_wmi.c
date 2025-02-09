@@ -2248,7 +2248,7 @@ static ssize_t keyboard_enable_show(struct device *dev,
 	return sprintf(buf, "%d\n", state);
 }
 
-static DEVICE_ATTR_RO(keyboard_enable);
+static DEVICE_ATTR_RW(keyboard_enable);
 
 static int hp_wmi_keyboard_init(void)
 {
