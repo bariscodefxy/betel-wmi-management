@@ -50,6 +50,11 @@ MODULE_ALIAS("wmi:5FB7F034-2C63-45E9-BE91-3D44E2C707E4");
 #define HP_POWER_LIMIT_DEFAULT	 0x00
 #define HP_POWER_LIMIT_NO_CHANGE 0xFF
 
+#define HP_VICTUS_S_RGB_RED		0x08
+#define HP_VICTUS_S_RGB_GREEN	0x09
+#define HP_VICTUS_S_RGB_BLUE	0x0A
+#define HP_VICTUS_S_RGB_ENABLE	0x1A
+
 #define ACPI_AC_CLASS "ac_adapter"
 
 #define zero_if_sup(tmp) (zero_insize_support?0:sizeof(tmp)) // use when zero insize is required
@@ -1947,6 +1952,7 @@ static int thermal_profile_setup(void)
 }
 
 static int hp_wmi_hwmon_init(void);
+static int hp_wmi_keyboard_init(void);
 
 static int __init hp_wmi_bios_setup(struct platform_device *device)
 {
@@ -1967,6 +1973,8 @@ static int __init hp_wmi_bios_setup(struct platform_device *device)
 		if (hp_wmi_rfkill_setup(device))
 			hp_wmi_rfkill2_setup(device);
 	}
+
+	hp_wmi_keyboard_init(); // AVSARTODO
 
 	err = hp_wmi_hwmon_init();
 
@@ -2183,6 +2191,85 @@ static int hp_wmi_hwmon_init(void)
 	}
 
 	return 0;
+}
+
+static ssize_t keyboard_color_store(struct device *dev,
+								    struct device_attribute *attr,
+								    const char *buf, size_t count)
+{
+	u8 r, g, b;
+
+	if (sscanf(buf, "%2hhx%2hhx%2hhx", &r, &g, &b) != 3)
+		return -EINVAL;
+
+	ec_write(HP_VICTUS_S_RGB_RED, r); // AVSARTODO: Add return check for error handling
+	ec_write(HP_VICTUS_S_RGB_GREEN, g);
+	ec_write(HP_VICTUS_S_RGB_BLUE, b);
+
+	return count;
+}
+
+static ssize_t keyboard_color_show(struct device *dev,
+								    struct device_attribute *attr,
+								    char *buf)
+{
+	u8 r, g, b;
+
+	ec_read(HP_VICTUS_S_RGB_RED, &r); // AVSARTODO: Add return check for error handling
+	ec_read(HP_VICTUS_S_RGB_GREEN, &g);
+	ec_read(HP_VICTUS_S_RGB_BLUE, &b);
+
+	return sprintf(buf, "%02X%02X%02X\n", r, g, b);
+}
+
+static DEVICE_ATTR_RW(keyboard_color);
+
+static ssize_t keyboard_enable_store(struct device *dev,
+								    struct device_attribute *attr,
+								    const char *buf, size_t count)
+{
+	u8 state;
+
+	if (sscanf(buf, "%hhd", &state) != 1)
+		return -EINVAL;
+
+	ec_write(HP_VICTUS_S_RGB_ENABLE, state ? 0x01 : 0x00);
+	return count;
+}
+
+static ssize_t keyboard_enable_show(struct device *dev,
+								    struct device_attribute *attr,
+								    char *buf)
+{
+	u8 state;
+
+	ec_read(HP_VICTUS_S_RGB_ENABLE, &state);
+
+	return sprintf(buf, "%d\n", state);
+}
+
+static DEVICE_ATTR_RO(keyboard_enable);
+
+static int hp_wmi_keyboard_init(void)
+{
+	int ret;
+	struct device *dev = &hp_wmi_platform_dev->dev;
+
+	if (!is_victus_s_thermal_profile()) {
+		return -1;
+	}
+
+	pr_info("Victus s1xxx thermal profile detected, enabling keyboard RGB sysfs.\n");
+
+	ret = device_create_file(dev, &dev_attr_keyboard_color);
+	if (ret)
+		pr_err("Failed to create keyboard_color sysfs file\n");
+
+	ret = device_create_file(dev, &dev_attr_keyboard_enable);
+	if (ret)
+		pr_err("Failed to create keyboard_enable sysfs file\n");
+
+	return ret;
 }
 
 static int __init hp_wmi_init(void)
