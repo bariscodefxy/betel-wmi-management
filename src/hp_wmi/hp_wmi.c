@@ -30,7 +30,6 @@
 #include <linux/rfkill.h>
 #include <linux/string.h>
 #include <linux/dmi.h>
-#include <linux/version.h>
 
 MODULE_AUTHOR("Matthew Garrett <mjg59@srcf.ucam.org>");
 MODULE_DESCRIPTION("HP laptop WMI driver");
@@ -74,7 +73,7 @@ static const char * const omen_thermal_profile_boards[] = {
 	"874A", "8603", "8604", "8748", "886B", "886C", "878A", "878B", "878C",
 	"88C8", "88CB", "8786", "8787", "8788", "88D1", "88D2", "88F4", "88FD",
 	"88F5", "88F6", "88F7", "88FE", "88FF", "8900", "8901", "8902", "8912",
-	"8917", "8918", "8949", "894A", "89EB", "8BAD", "8A42"
+	"8917", "8918", "8949", "894A", "89EB", "8BAD", "8A42", "8A15"
 };
 
 /* DMI Board names of Omen laptops that are specifically set to be thermal
@@ -90,14 +89,15 @@ static const char * const omen_thermal_profile_force_v0_boards[] = {
  * "balanced" when reaching zero.
  */
 static const char * const omen_timed_thermal_profile_boards[] = {
-	"8BAD", "8A42"
+	"8BAD", "8A42", "8A15"
 };
 
-/* DMI Board names of Victus laptops */
+/* DMI Board names of Victus 16-d1xxx laptops */
 static const char * const victus_thermal_profile_boards[] = {
 	"8A25"
 };
 
+/* DMI Board names of Victus 16-s1000 laptops */
 static const char * const victus_s_thermal_profile_boards[] = {
 	"8C9C"
 };
@@ -167,6 +167,7 @@ struct victus_power_limits {
 	u8 pl4;
 	u8 cpu_gpu_concurrent_limit;
 };
+
 struct victus_gpu_power_modes {
 	u8 ctgp_enable;
 	u8 ppab_enable;
@@ -311,7 +312,7 @@ static DEFINE_MUTEX(active_platform_profile_lock);
 static struct input_dev *hp_wmi_input_dev;
 static struct input_dev *camera_shutter_input_dev;
 static struct platform_device *hp_wmi_platform_dev;
-static struct platform_profile_handler platform_profile_handler;
+static struct device *platform_profile_device;
 static struct notifier_block platform_power_source_nb;
 static enum platform_profile_option active_platform_profile;
 static bool platform_profile_support;
@@ -459,11 +460,13 @@ static int hp_wmi_get_fan_count_userdefine_trigger(void)
 {
 	u8 fan_data[4] = {};
 	int ret;
+
 	ret = hp_wmi_perform_query(HPWMI_FAN_COUNT_GET_QUERY, HPWMI_GM,
 				   &fan_data, sizeof(u8),
 				   sizeof(fan_data));
 	if (ret != 0)
 		return -EINVAL;
+
 	return fan_data[0]; /* Others bytes aren't providing fan count */
 }
 
@@ -489,13 +492,16 @@ static int hp_wmi_get_fan_speed_victus_s(int fan)
 {
 	u8 fan_data[128] = {};
 	int ret;
+
 	if (fan < 0 || fan >= sizeof(fan_data))
 		return -EINVAL;
+
 	ret = hp_wmi_perform_query(HPWMI_VICTUS_S_FAN_SPEED_GET_QUERY,
 				   HPWMI_GM, &fan_data, sizeof(u8),
 				   sizeof(fan_data));
 	if (ret != 0)
 		return -EINVAL;
+
 	return fan_data[fan] * 100;
 }
 
@@ -511,40 +517,6 @@ static int hp_wmi_read_int(int query)
 
 	return val;
 }
-
-static int hp_wmi_fan_speed_reset(void)
-{
-	u8 fan_speed[2] = { HP_FAN_SPEED_AUTOMATIC, HP_FAN_SPEED_AUTOMATIC };
-	int ret;
-	ret = hp_wmi_perform_query(HPWMI_FAN_SPEED_SET_QUERY, HPWMI_GM,
-				   &fan_speed, sizeof(fan_speed), 0);
-	return ret;
-}
-
-static int hp_wmi_fan_speed_max_set(int enabled)
-{
-	int ret;
-
-	ret = hp_wmi_perform_query(HPWMI_FAN_SPEED_MAX_SET_QUERY, HPWMI_GM,
-				   &enabled, sizeof(enabled), 0);
-
-	if (ret)
-		return ret < 0 ? ret : -EINVAL;
-
-	return enabled;
-}
-
-static int hp_wmi_fan_speed_max_reset(void)
-{
-	int ret;
-	ret = hp_wmi_fan_speed_max_set(0);
-	if (ret)
-		return ret;
-	/* Disabling max fan speed on Victus s1xxx laptops needs a 2nd step: */
-	ret = hp_wmi_fan_speed_reset();
-	return ret;
-}
-
 
 static int hp_wmi_get_dock_state(void)
 {
@@ -646,6 +618,43 @@ static int omen_thermal_profile_get(void)
 		return ret;
 
 	return data;
+}
+
+static int hp_wmi_fan_speed_max_set(int enabled)
+{
+	int ret;
+
+	ret = hp_wmi_perform_query(HPWMI_FAN_SPEED_MAX_SET_QUERY, HPWMI_GM,
+				   &enabled, sizeof(enabled), 0);
+
+	if (ret)
+		return ret < 0 ? ret : -EINVAL;
+
+	return enabled;
+}
+
+static int hp_wmi_fan_speed_reset(void)
+{
+	u8 fan_speed[2] = { HP_FAN_SPEED_AUTOMATIC, HP_FAN_SPEED_AUTOMATIC };
+	int ret;
+
+	ret = hp_wmi_perform_query(HPWMI_FAN_SPEED_SET_QUERY, HPWMI_GM,
+				   &fan_speed, sizeof(fan_speed), 0);
+
+	return ret;
+}
+
+static int hp_wmi_fan_speed_max_reset(void)
+{
+	int ret;
+
+	ret = hp_wmi_fan_speed_max_set(0);
+	if (ret)
+		return ret;
+
+	/* Disabling max fan speed on Victus s1xxx laptops needs a 2nd step: */
+	ret = hp_wmi_fan_speed_reset();
+	return ret;
 }
 
 static int hp_wmi_fan_speed_max_get(void)
@@ -1312,7 +1321,7 @@ static int platform_profile_omen_get_ec(enum platform_profile_option *profile)
 	return 0;
 }
 
-static int platform_profile_omen_get(struct platform_profile_handler *pprof,
+static int platform_profile_omen_get(struct device *dev,
 				     enum platform_profile_option *profile)
 {
 	/*
@@ -1409,7 +1418,7 @@ static int platform_profile_omen_set_ec(enum platform_profile_option profile)
 	return 0;
 }
 
-static int platform_profile_omen_set(struct platform_profile_handler *pprof,
+static int platform_profile_omen_set(struct device *dev,
 				     enum platform_profile_option profile)
 {
 	int err;
@@ -1436,7 +1445,7 @@ static int thermal_profile_set(int thermal_profile)
 							   sizeof(thermal_profile), 0);
 }
 
-static int hp_wmi_platform_profile_get(struct platform_profile_handler *pprof,
+static int hp_wmi_platform_profile_get(struct device *dev,
 					enum platform_profile_option *profile)
 {
 	int tp;
@@ -1465,7 +1474,7 @@ static int hp_wmi_platform_profile_get(struct platform_profile_handler *pprof,
 	return 0;
 }
 
-static int hp_wmi_platform_profile_set(struct platform_profile_handler *pprof,
+static int hp_wmi_platform_profile_set(struct device *dev,
 					enum platform_profile_option profile)
 {
 	int err, tp;
@@ -1531,173 +1540,12 @@ static int platform_profile_victus_get_ec(enum platform_profile_option *profile)
 	return 0;
 }
 
-static int platform_profile_victus_s_get_ec(enum platform_profile_option *profile)
-{
-	int tp;
-
-	tp = omen_thermal_profile_get(); // avsar: emin değilim
-	if (tp < 0)
-		return tp;
-
-	switch (tp) {
-	case HP_VICTUS_S_THERMAL_PROFILE_PERFORMANCE:
-		*profile = PLATFORM_PROFILE_PERFORMANCE;
-		break;
-	case HP_VICTUS_S_THERMAL_PROFILE_DEFAULT:
-		*profile = PLATFORM_PROFILE_BALANCED;
-		break;
-	default:
-		return -EOPNOTSUPP;
-	}
-
-	return 0;
-}
-
-static int platform_profile_victus_get(struct platform_profile_handler *pprof,
+static int platform_profile_victus_get(struct device *dev,
 				       enum platform_profile_option *profile)
 {
 	/* Same behaviour as platform_profile_omen_get */
-	return platform_profile_omen_get(pprof, profile);
+	return platform_profile_omen_get(dev, profile);
 }
-
-static int platform_profile_victus_s_get(struct platform_profile_handler *pprof,
-				       enum platform_profile_option *profile)
-{
-	/* Same behaviour as platform_profile_omen_get */
-	return platform_profile_omen_get(pprof, profile);
-}
-
-static bool is_victus_s_thermal_profile(void)
-{
-	const char *board_name;
-	board_name = dmi_get_system_info(DMI_BOARD_NAME);
-	if (!board_name)
-		return false;
-	return match_string(victus_s_thermal_profile_boards,
-			    ARRAY_SIZE(victus_s_thermal_profile_boards),
-			    board_name) >= 0;
-}
-
-static int victus_s_gpu_thermal_profile_get(bool *ctgp_enable,
-					    bool *ppab_enable,
-					    u8 *dstate,
-					    u8 *gpu_slowdown_temp)
-{
-	struct victus_gpu_power_modes gpu_power_modes;
-	int ret;
-	ret = hp_wmi_perform_query(HPWMI_GET_GPU_THERMAL_MODES_QUERY, HPWMI_GM,
-				   &gpu_power_modes, sizeof(gpu_power_modes),
-				   sizeof(gpu_power_modes));
-	if (ret == 0) {
-		*ctgp_enable = gpu_power_modes.ctgp_enable ? true : false;
-		*ppab_enable = gpu_power_modes.ppab_enable ? true : false;
-		*dstate = gpu_power_modes.dstate;
-		*gpu_slowdown_temp = gpu_power_modes.gpu_slowdown_temp;
-	}
-	return ret;
-}
-
-static int victus_s_gpu_thermal_profile_set(bool ctgp_enable,
-					    bool ppab_enable,
-					    u8 dstate)
-{
-	struct victus_gpu_power_modes gpu_power_modes;
-	int ret;
-	bool current_ctgp_state, current_ppab_state;
-	u8 current_dstate, current_gpu_slowdown_temp;
-	/* Retrieving GPU slowdown temperature, in order to keep it unchanged */
-	ret = victus_s_gpu_thermal_profile_get(&current_ctgp_state,
-					       &current_ppab_state,
-					       &current_dstate,
-					       &current_gpu_slowdown_temp);
-	if (ret < 0) {
-		pr_warn("GPU modes not updated, unable to get slowdown temp\n");
-		return ret;
-	}
-	gpu_power_modes.ctgp_enable = ctgp_enable ? 0x01 : 0x00;
-	gpu_power_modes.ppab_enable = ppab_enable ? 0x01 : 0x00;
-	gpu_power_modes.dstate = dstate;
-	gpu_power_modes.gpu_slowdown_temp = current_gpu_slowdown_temp;
-	ret = hp_wmi_perform_query(HPWMI_SET_GPU_THERMAL_MODES_QUERY, HPWMI_GM,
-				   &gpu_power_modes, sizeof(gpu_power_modes), 0);
-	return ret;
-}
-
-/* Note: HP_POWER_LIMIT_DEFAULT can be used to restore default PL1 and PL2 */
-static int victus_s_set_cpu_pl1_pl2(u8 pl1, u8 pl2)
-{
-	struct victus_power_limits power_limits;
-	int ret;
-	/* We need to know both PL1 and PL2 values in order to check them */
-	if (pl1 == HP_POWER_LIMIT_NO_CHANGE || pl2 == HP_POWER_LIMIT_NO_CHANGE)
-		return -EINVAL;
-	/* PL2 is not supposed to be lower than PL1 */
-	if (pl2 < pl1)
-		return -EINVAL;
-	power_limits.pl1 = pl1;
-	power_limits.pl2 = pl2;
-	power_limits.pl4 = HP_POWER_LIMIT_NO_CHANGE;
-	power_limits.cpu_gpu_concurrent_limit = HP_POWER_LIMIT_NO_CHANGE;
-	ret = hp_wmi_perform_query(HPWMI_SET_POWER_LIMITS_QUERY, HPWMI_GM,
-				   &power_limits, sizeof(power_limits), 0);
-	return ret;
-}
-
-static int platform_profile_victus_s_set_ec(enum platform_profile_option profile)
-{
-	bool gpu_ctgp_enable, gpu_ppab_enable;
-	u8 gpu_dstate; /* Test shows 1 = 100%, 2 = 50%, 3 = 25%, 4 = 12.5% */
-	int err, tp;
-	switch (profile) {
-	case PLATFORM_PROFILE_PERFORMANCE:
-		tp = HP_VICTUS_S_THERMAL_PROFILE_PERFORMANCE;
-		gpu_ctgp_enable = true;
-		gpu_ppab_enable = true;
-		gpu_dstate = 1;
-		break;
-	case PLATFORM_PROFILE_BALANCED:
-		tp = HP_VICTUS_S_THERMAL_PROFILE_DEFAULT;
-		gpu_ctgp_enable = false;
-		gpu_ppab_enable = true;
-		gpu_dstate = 1;
-		break;
-	case PLATFORM_PROFILE_LOW_POWER:
-		tp = HP_VICTUS_S_THERMAL_PROFILE_DEFAULT;
-		gpu_ctgp_enable = false;
-		gpu_ppab_enable = false;
-		gpu_dstate = 1;
-		break;
-	default:
-		return -EOPNOTSUPP;
-	}
-	hp_wmi_get_fan_count_userdefine_trigger();
-	err = omen_thermal_profile_set(tp);
-	if (err < 0) {
-		pr_err("Failed to set platform profile %d: %d\n", profile, err);
-		return err;
-	}
-	err = victus_s_gpu_thermal_profile_set(gpu_ctgp_enable,
-					       gpu_ppab_enable,
-					       gpu_dstate);
-	if (err < 0) {
-		pr_err("Failed to set GPU profile %d: %d\n", profile, err);
-		return err;
-	}
-	return 0;
-}
-
-static int platform_profile_victus_s_set(struct platform_profile_handler *pprof,
-				       enum platform_profile_option profile)
-{
-	int err;
-	guard(mutex)(&active_platform_profile_lock);
-	err = platform_profile_victus_s_set_ec(profile);
-	if (err < 0)
-		return err;
-	active_platform_profile = profile;
-	return 0;
-}
-
 
 static int platform_profile_victus_set_ec(enum platform_profile_option profile)
 {
@@ -1724,7 +1572,162 @@ static int platform_profile_victus_set_ec(enum platform_profile_option profile)
 	return 0;
 }
 
-static int platform_profile_victus_set(struct platform_profile_handler *pprof,
+static bool is_victus_s_thermal_profile(void)
+{
+	const char *board_name;
+
+	board_name = dmi_get_system_info(DMI_BOARD_NAME);
+	if (!board_name)
+		return false;
+
+	return match_string(victus_s_thermal_profile_boards,
+			    ARRAY_SIZE(victus_s_thermal_profile_boards),
+			    board_name) >= 0;
+}
+
+static int victus_s_gpu_thermal_profile_get(bool *ctgp_enable,
+					    bool *ppab_enable,
+					    u8 *dstate,
+					    u8 *gpu_slowdown_temp)
+{
+	struct victus_gpu_power_modes gpu_power_modes;
+	int ret;
+
+	ret = hp_wmi_perform_query(HPWMI_GET_GPU_THERMAL_MODES_QUERY, HPWMI_GM,
+				   &gpu_power_modes, sizeof(gpu_power_modes),
+				   sizeof(gpu_power_modes));
+	if (ret == 0) {
+		*ctgp_enable = gpu_power_modes.ctgp_enable ? true : false;
+		*ppab_enable = gpu_power_modes.ppab_enable ? true : false;
+		*dstate = gpu_power_modes.dstate;
+		*gpu_slowdown_temp = gpu_power_modes.gpu_slowdown_temp;
+	}
+
+	return ret;
+}
+
+static int victus_s_gpu_thermal_profile_set(bool ctgp_enable,
+					    bool ppab_enable,
+					    u8 dstate)
+{
+	struct victus_gpu_power_modes gpu_power_modes;
+	int ret;
+
+	bool current_ctgp_state, current_ppab_state;
+	u8 current_dstate, current_gpu_slowdown_temp;
+
+	/* Retrieving GPU slowdown temperature, in order to keep it unchanged */
+	ret = victus_s_gpu_thermal_profile_get(&current_ctgp_state,
+					       &current_ppab_state,
+					       &current_dstate,
+					       &current_gpu_slowdown_temp);
+	if (ret < 0) {
+		pr_warn("GPU modes not updated, unable to get slowdown temp\n");
+		return ret;
+	}
+
+	gpu_power_modes.ctgp_enable = ctgp_enable ? 0x01 : 0x00;
+	gpu_power_modes.ppab_enable = ppab_enable ? 0x01 : 0x00;
+	gpu_power_modes.dstate = dstate;
+	gpu_power_modes.gpu_slowdown_temp = current_gpu_slowdown_temp;
+
+
+	ret = hp_wmi_perform_query(HPWMI_SET_GPU_THERMAL_MODES_QUERY, HPWMI_GM,
+				   &gpu_power_modes, sizeof(gpu_power_modes), 0);
+
+	return ret;
+}
+
+/* Note: HP_POWER_LIMIT_DEFAULT can be used to restore default PL1 and PL2 */
+static int victus_s_set_cpu_pl1_pl2(u8 pl1, u8 pl2)
+{
+	struct victus_power_limits power_limits;
+	int ret;
+
+	/* We need to know both PL1 and PL2 values in order to check them */
+	if (pl1 == HP_POWER_LIMIT_NO_CHANGE || pl2 == HP_POWER_LIMIT_NO_CHANGE)
+		return -EINVAL;
+
+	/* PL2 is not supposed to be lower than PL1 */
+	if (pl2 < pl1)
+		return -EINVAL;
+
+	power_limits.pl1 = pl1;
+	power_limits.pl2 = pl2;
+	power_limits.pl4 = HP_POWER_LIMIT_NO_CHANGE;
+	power_limits.cpu_gpu_concurrent_limit = HP_POWER_LIMIT_NO_CHANGE;
+
+	ret = hp_wmi_perform_query(HPWMI_SET_POWER_LIMITS_QUERY, HPWMI_GM,
+				   &power_limits, sizeof(power_limits), 0);
+
+	return ret;
+}
+
+static int platform_profile_victus_s_set_ec(enum platform_profile_option profile)
+{
+	bool gpu_ctgp_enable, gpu_ppab_enable;
+	u8 gpu_dstate; /* Test shows 1 = 100%, 2 = 50%, 3 = 25%, 4 = 12.5% */
+	int err, tp;
+
+	switch (profile) {
+	case PLATFORM_PROFILE_PERFORMANCE:
+		tp = HP_VICTUS_S_THERMAL_PROFILE_PERFORMANCE;
+		gpu_ctgp_enable = true;
+		gpu_ppab_enable = true;
+		gpu_dstate = 1;
+		break;
+	case PLATFORM_PROFILE_BALANCED:
+		tp = HP_VICTUS_S_THERMAL_PROFILE_DEFAULT;
+		gpu_ctgp_enable = false;
+		gpu_ppab_enable = true;
+		gpu_dstate = 1;
+		break;
+	case PLATFORM_PROFILE_LOW_POWER:
+		tp = HP_VICTUS_S_THERMAL_PROFILE_DEFAULT;
+		gpu_ctgp_enable = false;
+		gpu_ppab_enable = false;
+		gpu_dstate = 1;
+		break;
+	default:
+		return -EOPNOTSUPP;
+	}
+
+	hp_wmi_get_fan_count_userdefine_trigger();
+
+	err = omen_thermal_profile_set(tp);
+	if (err < 0) {
+		pr_err("Failed to set platform profile %d: %d\n", profile, err);
+		return err;
+	}
+
+	err = victus_s_gpu_thermal_profile_set(gpu_ctgp_enable,
+					       gpu_ppab_enable,
+					       gpu_dstate);
+	if (err < 0) {
+		pr_err("Failed to set GPU profile %d: %d\n", profile, err);
+		return err;
+	}
+
+	return 0;
+}
+
+static int platform_profile_victus_s_set(struct device *dev,
+					 enum platform_profile_option profile)
+{
+	int err;
+
+	guard(mutex)(&active_platform_profile_lock);
+
+	err = platform_profile_victus_s_set_ec(profile);
+	if (err < 0)
+		return err;
+
+	active_platform_profile = profile;
+
+	return 0;
+}
+
+static int platform_profile_victus_set(struct device *dev,
 				       enum platform_profile_option profile)
 {
 	int err;
@@ -1740,31 +1743,24 @@ static int platform_profile_victus_set(struct platform_profile_handler *pprof,
 	return 0;
 }
 
-static int victus_s_powersource_event(struct notifier_block *nb,
-				      unsigned long value,
-				      void *data)
+static int hp_wmi_platform_profile_probe(void *drvdata, unsigned long *choices)
 {
-	struct acpi_bus_event *event_entry = data;
-	int err;
-	if (strcmp(event_entry->device_class, ACPI_AC_CLASS) != 0)
-		return NOTIFY_DONE;
-	pr_debug("Received power source device event\n");
-	/*
-	 * Switching to battery power source while Performance mode is active
-	 * needs manual triggering of CPU power limits. Same goes when switching
-	 * to AC power source while Performance mode is active. Other modes
-	 * however are automatically behaving without any manual action.
-	 * Seen on HP 16-s1034nf (board 8C9C) with F.11 and F.13 BIOS versions.
-	 */
-	if (active_platform_profile == PLATFORM_PROFILE_PERFORMANCE) {
-		pr_debug("Triggering CPU PL1/PL2 actualization\n");
-		err = victus_s_set_cpu_pl1_pl2(HP_POWER_LIMIT_DEFAULT,
-					       HP_POWER_LIMIT_DEFAULT);
-		if (err)
-			pr_warn("Failed to actualize power limits: %d\n", err);
-		return NOTIFY_DONE;
+	if (is_omen_thermal_profile()) {
+		set_bit(PLATFORM_PROFILE_COOL, choices);
+	} else if (is_victus_thermal_profile()) {
+		set_bit(PLATFORM_PROFILE_QUIET, choices);
+	} else if (is_victus_s_thermal_profile()) {
+		/* Adding an equivalent to HP Omen software ECO mode: */
+		set_bit(PLATFORM_PROFILE_LOW_POWER, choices);
+	} else {
+		set_bit(PLATFORM_PROFILE_QUIET, choices);
+		set_bit(PLATFORM_PROFILE_COOL, choices);
 	}
-	return NOTIFY_OK;
+
+	set_bit(PLATFORM_PROFILE_BALANCED, choices);
+	set_bit(PLATFORM_PROFILE_PERFORMANCE, choices);
+
+	return 0;
 }
 
 static int omen_powersource_event(struct notifier_block *nb,
@@ -1824,6 +1820,39 @@ static int omen_powersource_event(struct notifier_block *nb,
 	return NOTIFY_OK;
 }
 
+static int victus_s_powersource_event(struct notifier_block *nb,
+				      unsigned long value,
+				      void *data)
+{
+	struct acpi_bus_event *event_entry = data;
+	int err;
+
+	if (strcmp(event_entry->device_class, ACPI_AC_CLASS) != 0)
+		return NOTIFY_DONE;
+
+	pr_debug("Received power source device event\n");
+
+	/*
+	 * Switching to battery power source while Performance mode is active
+	 * needs manual triggering of CPU power limits. Same goes when switching
+	 * to AC power source while Performance mode is active. Other modes
+	 * however are automatically behaving without any manual action.
+	 * Seen on HP 16-s1034nf (board 8C9C) with F.11 and F.13 BIOS versions.
+	 */
+
+	if (active_platform_profile == PLATFORM_PROFILE_PERFORMANCE) {
+		pr_debug("Triggering CPU PL1/PL2 actualization\n");
+		err = victus_s_set_cpu_pl1_pl2(HP_POWER_LIMIT_DEFAULT,
+					       HP_POWER_LIMIT_DEFAULT);
+		if (err)
+			pr_warn("Failed to actualize power limits: %d\n", err);
+
+		return NOTIFY_DONE;
+	}
+
+	return NOTIFY_OK;
+}
+
 static int omen_register_powersource_event_handler(void)
 {
 	int err;
@@ -1842,12 +1871,14 @@ static int omen_register_powersource_event_handler(void)
 static int victus_s_register_powersource_event_handler(void)
 {
 	int err;
+
 	platform_power_source_nb.notifier_call = victus_s_powersource_event;
 	err = register_acpi_notifier(&platform_power_source_nb);
 	if (err < 0) {
 		pr_warn("Failed to install ACPI power source notify handler\n");
 		return err;
 	}
+
 	return 0;
 }
 
@@ -1861,8 +1892,33 @@ static inline void victus_s_unregister_powersource_event_handler(void)
 	unregister_acpi_notifier(&platform_power_source_nb);
 }
 
-static int thermal_profile_setup(void)
+static const struct platform_profile_ops platform_profile_omen_ops = {
+	.probe = hp_wmi_platform_profile_probe,
+	.profile_get = platform_profile_omen_get,
+	.profile_set = platform_profile_omen_set,
+};
+
+static const struct platform_profile_ops platform_profile_victus_ops = {
+	.probe = hp_wmi_platform_profile_probe,
+	.profile_get = platform_profile_victus_get,
+	.profile_set = platform_profile_victus_set,
+};
+
+static const struct platform_profile_ops platform_profile_victus_s_ops = {
+	.probe = hp_wmi_platform_profile_probe,
+	.profile_get = platform_profile_omen_get,
+	.profile_set = platform_profile_victus_s_set,
+};
+
+static const struct platform_profile_ops hp_wmi_platform_profile_ops = {
+	.probe = hp_wmi_platform_profile_probe,
+	.profile_get = hp_wmi_platform_profile_get,
+	.profile_set = hp_wmi_platform_profile_set,
+};
+
+static int thermal_profile_setup(struct platform_device *device)
 {
+	const struct platform_profile_ops *ops;
 	int err, tp;
 
 	if (is_omen_thermal_profile()) {
@@ -1878,10 +1934,7 @@ static int thermal_profile_setup(void)
 		if (err < 0)
 			return err;
 
-		platform_profile_handler.profile_get = platform_profile_omen_get;
-		platform_profile_handler.profile_set = platform_profile_omen_set;
-
-		set_bit(PLATFORM_PROFILE_COOL, platform_profile_handler.choices);
+		ops = &platform_profile_omen_ops;
 	} else if (is_victus_thermal_profile()) {
 		err = platform_profile_victus_get_ec(&active_platform_profile);
 		if (err < 0)
@@ -1895,27 +1948,19 @@ static int thermal_profile_setup(void)
 		if (err < 0)
 			return err;
 
-		platform_profile_handler.profile_get = platform_profile_victus_get;
-		platform_profile_handler.profile_set = platform_profile_victus_set;
-
-		set_bit(PLATFORM_PROFILE_QUIET, platform_profile_handler.choices);
+		ops = &platform_profile_victus_ops;
 	} else if (is_victus_s_thermal_profile()) {
-		err = platform_profile_victus_s_get_ec(&active_platform_profile);
-		if (err < 0)
-			return err;
-
 		/*
-		 * call thermal profile write command to ensure that the
-		 * firmware correctly sets the OEM variables
+		 * Being unable to retrieve laptop's current thermal profile,
+		 * during this setup, we set it to Balanced by default.
 		 */
+		active_platform_profile = PLATFORM_PROFILE_BALANCED;
+
 		err = platform_profile_victus_s_set_ec(active_platform_profile);
 		if (err < 0)
 			return err;
 
-		platform_profile_handler.profile_get = platform_profile_victus_s_get;
-		platform_profile_handler.profile_set = platform_profile_victus_s_set;
-
-		set_bit(PLATFORM_PROFILE_BALANCED, platform_profile_handler.choices); // AVSAR
+		ops = &platform_profile_victus_s_ops;
 	} else {
 		tp = thermal_profile_get();
 
@@ -1930,22 +1975,15 @@ static int thermal_profile_setup(void)
 		if (err)
 			return err;
 
-		platform_profile_handler.profile_get = hp_wmi_platform_profile_get;
-		platform_profile_handler.profile_set = hp_wmi_platform_profile_set;
-
-		set_bit(PLATFORM_PROFILE_QUIET, platform_profile_handler.choices);
-		set_bit(PLATFORM_PROFILE_COOL, platform_profile_handler.choices);
+		ops = &hp_wmi_platform_profile_ops;
 	}
 
-	set_bit(PLATFORM_PROFILE_BALANCED, platform_profile_handler.choices);
-	set_bit(PLATFORM_PROFILE_PERFORMANCE, platform_profile_handler.choices);
-
-	err = platform_profile_register(&platform_profile_handler);
-	if (err)
-		return err;
+	platform_profile_device = devm_platform_profile_register(&device->dev, "hp-wmi",
+								 NULL, ops);
+	if (IS_ERR(platform_profile_device))
+		return PTR_ERR(platform_profile_device);
 
 	pr_info("Registered as platform profile handler\n");
-
 	platform_profile_support = true;
 
 	return 0;
@@ -1981,7 +2019,7 @@ static int __init hp_wmi_bios_setup(struct platform_device *device)
 	if (err < 0)
 		return err;
 
-	thermal_profile_setup();
+	thermal_profile_setup(device);
 
 	return 0;
 }
@@ -2007,9 +2045,6 @@ static void __exit hp_wmi_bios_remove(struct platform_device *device)
 		rfkill_unregister(wwan_rfkill);
 		rfkill_destroy(wwan_rfkill);
 	}
-
-	if (platform_profile_support)
-		platform_profile_remove();
 }
 
 static int hp_wmi_resume_handler(struct device *device)
@@ -2066,11 +2101,7 @@ static struct platform_driver hp_wmi_driver __refdata = {
 		.pm = &hp_wmi_pm_ops,
 		.dev_groups = hp_wmi_groups,
 	},
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
 	.remove = __exit_p(hp_wmi_bios_remove),
-#else
-	.remove_new = __exit_p(hp_wmi_bios_remove),
-#endif
 };
 
 static umode_t hp_wmi_hwmon_is_visible(const void *data,
@@ -2107,7 +2138,6 @@ static int hp_wmi_hwmon_read(struct device *dev, enum hwmon_sensor_types type,
 			ret = hp_wmi_get_fan_speed_victus_s(channel);
 		else
 			ret = hp_wmi_get_fan_speed(channel);
-
 		if (ret < 0)
 			return ret;
 		*val = ret;
@@ -2142,10 +2172,10 @@ static int hp_wmi_hwmon_write(struct device *dev, enum hwmon_sensor_types type,
 		case 0:
 			if (is_victus_s_thermal_profile())
 				hp_wmi_get_fan_count_userdefine_trigger();
-
 			/* 0 is no fan speed control (max), which is 1 for us */
 			return hp_wmi_fan_speed_max_set(1);
 		case 2:
+			/* 2 is automatic speed control, which is 0 for us */
 			if (is_victus_s_thermal_profile()) {
 				hp_wmi_get_fan_count_userdefine_trigger();
 				return hp_wmi_fan_speed_max_reset();
