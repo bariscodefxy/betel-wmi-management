@@ -2344,6 +2344,8 @@ static int __init hp_wmi_init(void)
 			goto err_unregister_device;
 	}
 
+	pr_info("betel-wmi-management is running.\n");
+
 	return 0;
 
 err_unregister_device:
