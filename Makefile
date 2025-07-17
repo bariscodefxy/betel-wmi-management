@@ -1,4 +1,4 @@
-obj-m += hp_wmi.o
+obj-m += src/hp_wmi/hp_wmi.o
 
 KVERSION := $(shell uname -r)
 KDIR := /lib/modules/$(KVERSION)/build
